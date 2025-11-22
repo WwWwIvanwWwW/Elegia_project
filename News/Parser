@@ -1,0 +1,77 @@
+import os
+import requests
+from bs4 import BeautifulSoup
+import re
+
+def sanitize_filename(filename):
+    # Удаляем недопустимые символы для названий файлов
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = filename.replace(' ', '_').replace('\n', '').replace('\r', '')
+    return filename[:100]  # Ограничиваем длину названия файла
+
+def parse_news(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Извлекаем название новости (обычно в теге h1 или похожем)
+        title_tag = soup.find('h1', class_='topic-body__titles') or soup.find('h1')
+        if not title_tag:
+            return None, None
+        title = title_tag.get_text(strip=True)
+        
+        # Извлекаем текст новости (обычно в div с классом, содержащим текст)
+        content_div = soup.find('div', {'itemprop': 'articleBody'}) or soup.find('div', class_='topic-body__content')
+        if not content_div:
+            return title, None
+        
+        # Извлекаем HTML содержимого и заменяем подчеркнутый текст (в тегах <u>) на обычный
+        content_html = str(content_div)
+        # Используем BeautifulSoup для очистки, но затем обрабатываем HTML строку
+        # Чтобы избежать потери текста, используем регулярное выражение для замены <u>...</u> на обычный текст
+        content_html = re.sub(r'<u[^>]*>(.*?)</u>', r'\1', content_html, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Теперь удаляем все остальные HTML-теги, оставляя только текст
+        soup_clean = BeautifulSoup(content_html, 'html.parser')
+        content = soup_clean.get_text(separator=' ', strip=True)
+        
+        return title, content
+    except Exception as e:
+        print(f"Ошибка при парсинге {url}: {e}")
+        return None, None
+
+def main():
+    base_url = 'https://lenta.ru'
+    response = requests.get(base_url)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Ищем ссылки на новости (обычно в карточках новостей)
+    news_links = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if href.startswith('/news/') and not href.endswith('.html'):
+            # Добавляем домен, если ссылка относительная
+            if href.startswith('/'):
+                href = base_url + href
+            news_links.append(href)
+    
+    # Удаляем дубликаты
+    news_links = list(set(news_links))
+    
+    # Ограничиваем до 10 новостей для примера (можно убрать ограничение)
+    for link in news_links[:1]:
+        print(f"Парсим: {link}")
+        title, content = parse_news(link)
+        if title and content:
+            filename = sanitize_filename(title) + '.txt'
+            filepath = os.path.join(os.getcwd(), filename)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"Сохранено: {filename}")
+        else:
+            print(f"Не удалось извлечь данные из {link}")
+
+if __name__ == "__main__":
+    main()
