@@ -1,0 +1,19 @@
+{
+  "sources": [
+    {
+      "name": "Лента.ру",
+      "rss_url": "https://lenta.ru/rss/",
+      "language": "ru"
+    },
+    {
+      "name": "ТАСС",
+      "rss_url": "https://tass.ru/rss/v2.xml",
+      "language": "ru"
+    },
+    {
+      "name": "РИА Новости",
+      "rss_url": "https://ria.ru/export/rss2/archive/index.xml",
+      "language": "ru"
+    }
+  ]
+}
