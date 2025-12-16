@@ -1,29 +1,36 @@
 import aiohttp
 import os
-from bot.config import Config
+from dotenv import load_dotenv
 
-PROMPTS_DIR = "data/prompts"
+load_dotenv()
 
-async def call_llm(prompt: str, model: str = Config.OPENROUTER_MODEL) -> str:
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL_NAME = "tngtech/deepseek-r1t-chimera:free" # Убедитесь, что модель доступна
+
+async def call_llm(prompt: str) -> str:
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {Config.OPENROUTER_API_KEY}",
-        "HTTP-Referer": "https://github.com/yourname/news_hive",
-        "X-Title": "NewsHive Bot",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": model,
+    data = {
+        "model": MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3
+        "max_tokens": 500,
+        "temperature": 0.1, # Меньше для более детерминированного вывода
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(Config.OPENROUTER_URL, headers=headers, json=payload) as resp:
-            if resp.status != 200:
-                raise Exception(f"LLM error: {await resp.text()}")
-            data = await resp.json()
-            return data["choices"][0]["message"]["content"].strip()
 
-def load_prompt(agent_name: str) -> str:
-    path = os.path.join(PROMPTS_DIR, f"{agent_name}_prompt.txt")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=data) as response:
+                if response.status == 429:
+                    print(f"Ошибка API: {response.status} - Too Many Requests")
+                    return "error"
+                elif response.status != 200:
+                    print(f"Ошибка API: {response.status}")
+                    return "error"
+                result = await response.json()
+                return result['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        print(f"Ошибка при вызове LLM: {e}")
+        return "error"

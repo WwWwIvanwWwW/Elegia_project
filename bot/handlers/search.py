@@ -1,38 +1,30 @@
-# bot/handlers/search.py
-from aiogram import Router, types, F
+from aiogram import Router
+from aiogram.types import Message
 from aiogram.filters import Command
-from services.news_search import search_news_by_tag
+from database.db import get_news_by_tag_or_text
+import logging
 
+logger = logging.getLogger(__name__)
 router = Router()
 
-@router.message(F.text == "🔍 Поиск по тегу")
-async def btn_search(message: types.Message):
-    await message.answer(
-        "🔍 Отправьте команду вида:\n<code>/search военная_операция</code>\n\n"
-        "Или просто напишите <code>/search</code>, чтобы увидеть подсказку.",
-        parse_mode="HTML"
-    )
-
 @router.message(Command("search"))
-async def cmd_search(message: types.Message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer(
-            "🔍 Пример использования:\n<code>/search внешняя_политика</code>\n"
-            "Теги состоят из слов через подчёркивание (_).",
-            parse_mode="HTML"
-        )
+async def cmd_search(message: Message):
+    logger.info(f"Команда /search вызвана пользователем {message.from_user.id} с текстом: {message.text}")
+    query = message.text.split(maxsplit=1)
+    if len(query) < 2:
+        await message.answer("Пожалуйста, укажите тег или слово для поиска. Пример: `/search ИИ`")
         return
 
-    # Приводим ввод к нижнему регистру и заменяем пробелы
-    raw_tag = parts[1].strip()
-    tag = raw_tag.lower().replace(" ", "_")
-
-    results = search_news_by_tag(tag, limit=3)
+    query_text = query[1].strip()
+    results = get_news_by_tag_or_text(query_text)
 
     if not results:
-        await message.answer(f"Ничего не найдено по тегу «<code>{tag}</code>».", parse_mode="HTML")
+        await message.answer(f"Новости по запросу '{query_text}' не найдены.")
         return
 
-    for msg in results:
-        await message.answer(msg, parse_mode="MarkdownV2")
+    response = f"Найдено {len(results)} новостей по запросу '{query_text}':\n\n"
+    for item in results:
+        tags_str = " ".join([f"#{tag}" for tag in item["tags"]])
+        response += f"🔹 [{item['title']}]({item['url']})\n{tags_str}\n\n"
+
+    await message.answer(response)

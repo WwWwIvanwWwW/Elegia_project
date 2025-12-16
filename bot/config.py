@@ -1,10 +1,16 @@
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class Config:
-    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    OPENROUTER_MODEL = "tngtech/deepseek-r1t-chimera:free"
-    OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DEFAULT_DIGEST_MODE = os.getenv("DEFAULT_DIGEST_MODE", "brief")
+
+if not BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN не найден в .env")
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp = Dispatcher()

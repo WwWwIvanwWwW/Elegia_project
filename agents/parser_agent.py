@@ -1,65 +1,134 @@
-# agents/parser_agent.py
+import requests
 import json
-import re
-from agents.request import call_llm, load_prompt
+import hashlib
+from bs4 import BeautifulSoup
+import logging
+import time
+import os
+import feedparser 
+from dotenv import load_dotenv
 
-def extract_first_json(text: str) -> dict:
-    """Надёжно извлекает первый валидный JSON из любого текста (даже с вложенными объектами)."""
-    # 1. Ищем JSON в Markdown-блоке: ```json {...} ``` или ```{...}```
-    markdown_json = re.search(r"```(?:json)?\s*({.*?})\s*```", text, re.DOTALL)
-    if markdown_json:
-        try:
-            return json.loads(markdown_json.group(1))
-        except json.JSONDecodeError:
-            pass
 
-    # 2. Если не нашли — ищем "голый" JSON, балансируя фигурные скобки
-    stack = []
-    start = None
-    for i, char in enumerate(text):
-        if char == '{':
-            if start is None:
-                start = i
-            stack.append(char)
-        elif char == '}':
-            if stack:
-                stack.pop()
-                if not stack and start is not None:
-                    try:
-                        return json.loads(text[start:i+1])
-                    except json.JSONDecodeError:
-                        start = None
-                        continue
-    raise ValueError(f"Не удалось найти JSON в ответе parser_agent. Ответ: {text[:200]}...")
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-async def run(raw_text: str) -> dict:
-    if not raw_text or not raw_text.strip():
-        raw_text = "Новость без содержания"
+load_dotenv()  # Загрузить .env
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY не установлен")
+DEEPSEEK_URL = "tngtech/deepseek-r1t-chimera:free"  # Пример URL, проверьте документацию
+
+def extract_news_with_llm(json_data):
+    json_data = json_data[:1]  
+    prompt = f"""
+    Ты - помощник для анализа новостей. Вот список новостей в формате JSON: {json.dumps(json_data, ensure_ascii=False)}.
+    Для каждой новости добавь поле "summary" с кратким описанием (1-2 предложения) на основе заголовка и URL (если нужно, сделай запрос к URL для деталей).
+    Верни результат в виде валидного JSON-массива, без лишнего текста. Если не хватает места, обработай только первые 20 новостей.
+    """
     
-    prompt_template = load_prompt("parser")
-    prompt = prompt_template % raw_text
-    response = await call_llm(prompt)
-
+    headers = {
+        'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    data = {
+        'model': 'tngtech/deepseek-r1t2-chimera:free',  # Бесплатный вариант DeepSeek через OpenRouter
+        'messages': [{'role': 'user', 'content': prompt}],
+        'max_tokens': 1000
+    }
+    
     try:
-        result = extract_first_json(response)
-    except ValueError:
-        # Fallback: извлекаем заголовок и тело вручную
-        lines = raw_text.strip().split('\n', 2)
-        title = lines[0][:200] if lines else "Без заголовка"
-        body = lines[1] if len(lines) > 1 else (lines[0] if lines else "")
-        result = {
-            "title": title,
-            "body": body,
-            "publication_date": None,
-            "source_url": None
-        }
+        response = requests.post('https://openrouter.ai/api/v1/chat/completions', headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        content = response.json()["choices"][0]["message"]["content"]
+        
+        # Попытка распарсить JSON
+        updated_news = json.loads(content)
+        logger.debug(f"LLM успешно вернул {len(updated_news)} новостей с summary.")
+        return updated_news
+    except json.JSONDecodeError as e:
+        logger.error(f"Не удалось распарсить JSON от LLM: {e}. Содержимое: {content[:500]}...")
+        # Fallback: вернуть оригинальные данные без изменений
+        return json_data
+    except Exception as e:
+        logger.error(f"Ошибка при вызове LLM: {e}")
+        return json_data
 
-    # Гарантируем, что все поля — строки
-    result.setdefault("title", "")
-    result.setdefault("body", "")
-    if result["title"] is None:
-        result["title"] = ""
-    if result["body"] is None:
-        result["body"] = ""
+def extract_news_with_beautifulsoup(url):
+    """
+    Fallback: парсит новости с главной страницы Lenta.ru с помощью BeautifulSoup.
+    Обновлены селекторы на основе типичных классов (адаптируйте под реальную страницу).
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Обновленные селекторы (проверьте вручную на lenta.ru)
+        # Пример: ищем заголовки и тексты в карточках новостей
+        titles = soup.find_all('h3', class_=lambda x: x and 'card' in x and 'title' in x)  # Частичный поиск для гибкости
+        texts = soup.find_all('div', class_=lambda x: x and 'card' in x and 'text' in x)
+        
+        logger.debug(f"Найдено {len(titles)} заголовков и {len(texts)} текстов.")
+        
+        news_list = []
+        for i in range(min(len(titles), len(texts))):
+            title = titles[i].get_text(strip=True)
+            text = texts[i].get_text(strip=True)
+            news_list.append({
+                "title": title,
+                "summary": text[:200] + "..." if len(text) > 200 else text,  # Краткое summary
+                "url": ""  # URL не извлекаем, но можно добавить
+            })
+        
+        logger.debug(f"Извлечено {len(news_list)} новостей с помощью BeautifulSoup.")
+        return news_list
+    except Exception as e:
+        logger.error(f"Ошибка при парсинге с BeautifulSoup: {e}")
+        return []
 
-    return result
+def parse_news_agent():
+    """
+    Основная функция: парсит RSS, пытается использовать LLM для summary, fallback на BS.
+    """
+    rss_url = "https://lenta.ru/rss/news"
+    lenta_url = "https://lenta.ru/"
+    
+    # Парсинг RSS
+    feed = feedparser.parse(rss_url)
+    if feed.bozo:  # Проверка на ошибки
+        logger.error("Ошибка парсинга RSS.")
+        return []
+    
+    json_data = []
+    for entry in feed.entries:
+        json_data.append({
+            "title": entry.title,
+            "url": entry.link,
+            "summary": ""  # Пустое, чтобы LLM заполнил
+        })
+    
+    logger.debug(f"Из RSS извлечено {len(json_data)} новостей.")
+    
+    # Попытка с LLM
+    updated_news = extract_news_with_llm(json_data)
+    
+    # Если LLM не сработал или вернул мало данных, fallback на BS
+    if not updated_news:  # or len(updated_news) < 10
+        logger.info("Переход к fallback с BeautifulSoup.")
+        time.sleep(1)  # Задержка перед повтором
+        bs_news = extract_news_with_beautifulsoup(lenta_url)
+        if bs_news:
+            updated_news = bs_news
+    
+    logger.debug(f"Итоговый результат: {len(updated_news)} новостей.")
+    return updated_news
+
+if __name__ == "__main__":
+    news = parse_news_agent()
+    print(json.dumps(news, ensure_ascii=False, indent=4))

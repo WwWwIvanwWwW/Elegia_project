@@ -1,79 +1,66 @@
-# services/news_pipeline.py
-import json
-from agents.parser_agent import run as parse
+from typing import Dict, Any
+from agents.parser_agent import parse_news_agent as parse
 from agents.summarizer_agent import run as summarize
-from agents.tags_agent import run as tags_agent
+from agents.tags_agent import run as tag
 from agents.recommend_agent import run as recommend
 from agents.render_agent import run as render
-from services.user_profile import get_user_tags
-from services.news_cache import get_cached_news, cache_news
-from database import get_db_connection
+from database.db import cache_news
+import logging
+import asyncio
 
-async def process_news_for_user(raw_news: dict, user_id: int, style: str = "brief") -> str | None:
-    url = raw_news["url"]
-    
-    # Проверка кэша
-    cached = get_cached_news(url)
-    if cached:
-        user_tags = get_user_tags(user_id)
-        is_relevant = await recommend(user_tags, cached["tags"])
-        if is_relevant:
-            news_data = {
-                "title": cached["title"],
-                "brief": cached["summary_brief"],
-                "full": cached["summary_full"],
-                "points": cached["summary_points"].split("\n") if cached["summary_points"] else [],
-                "category": cached["category"],
-                "tags": cached["tags"]
-            }
-            return await render(news_data, style=style)
+logger = logging.getLogger(__name__)
+
+async def process_news_for_user(raw_news_item: Dict[str, Any], user_id: int, style: str = "full"):
+    try:
+        # 1. Парсинг
+        parsed = await parse()
+        await asyncio.sleep(2)  # Задержка после вызова LLM
+        if not parsed.get("text"):
+            logger.warning(f"Не удалось спарсить содержимое статьи: {raw_news_item['url']}")
+            return None
+
+        # 2. Суммаризация
+        summary = await summarize(parsed["text"], style=style)
+        await asyncio.sleep(2)  # Задержка после вызова LLM
+
+        # 3. Тегирование
+        '''
+        tags_result = await tag(summary)
+        await asyncio.sleep(2)  # Задержка после вызова LLM
+        category = tags_result["category"]
+        tags = tags_result["tags"]
+        '''
+        # 4. Персонализация
+        '''
+        is_relevant = await recommend(user_id, category, tags)
+        await asyncio.sleep(2)  # Задержка после вызова LLM
+        if not is_relevant:
+            logger.info(f"Новость {parsed['url']} не релевантна пользователю {user_id}")
+            return None
+        '''
+        # 5. Кэширование (до форматирования, чтобы не дублировать)
+        cache_news(
+            title=parsed["title"],
+            summary=summary,
+            url=parsed["url"],
+            category=category,
+            tags=tags,
+            source=parsed["summary"],
+            published_at=parsed.get("published_at", "unknown")
+        )
+
+        # 6. Форматирование
+        rendered_text = await render(
+            title=parsed["title"],
+            summary=summary,
+            category=category,
+            tags=tags,
+            url=parsed["url"],
+            style=style
+        )
+        await asyncio.sleep(2)  # Задержка после вызова LLM
+        return rendered_text
+
+    except Exception as e:
+        logger.error(f"Ошибка в pipeline для {raw_news_item.get('url', 'unknown')}: {e}")
         return None
-
-    # Полный pipeline
-    parsed = await parse(raw_news["raw_text"])
-    summary = await summarize(parsed["body"])
-    tags_result = await tags_agent(parsed["body"])
-    tags = tags_result["tags"]
-    category = tags_result["category"]
-    
-    user_tags = get_user_tags(user_id)
-    is_relevant = await recommend(user_tags, tags)
-    if not is_relevant:
-        return None
-
-    news_data = {
-        "title": parsed["title"],
-        "brief": summary["brief"],
-        "full": summary["full"],
-        "points": summary["points"],
-        "category": category,
-        "tags": tags
-    }
-
-    # Сохраняем в кэш
-    rendered_text = await render(news_data, style="full")
-    cache_news(url, {
-        "title": parsed["title"],
-        "summary_brief": summary["brief"],
-        "summary_full": summary["full"],
-        "summary_points": "\n".join(summary["points"]) if isinstance(summary["points"], list) else summary["points"],
-        "tags": tags,
-        "category": category,
-        "rendered_text": rendered_text
-    })
-
-    
-    # 🔥 ДОБАВЛЯЕМ СОХРАНЕНИЕ ТЕГОВ В news_tags
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM raw_news WHERE url = ?", (url,))
-    row = cursor.fetchone()
-    if row:
-        news_id = row[0]
-        cursor.execute("DELETE FROM news_tags WHERE news_id = ?", (news_id,))
-        for tag in tags:
-            cursor.execute("INSERT INTO news_tags (news_id, tag) VALUES (?, ?)", (news_id, tag.lower()))
-    conn.commit()
-    conn.close()
-
-    return await render(news_data, style=style)
